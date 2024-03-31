@@ -1,0 +1,76 @@
+{{id name="dsh-setup-and-usage-guide"}}DSH Setup and Usage Guide{{/id}}
+
+{{id name="introduction"}}Introduction{{/id}}
+{{info}}
+This guide provides detailed instructions for setting up and running Distributed Shell (DSH) on a cluster of machines. Specifically, it covers the configuration of DSH on four Linux/Unix machines, named g111, g112, g113, and g114, including the process of creating and distributing SSH keys for secure operation.
+{{/info}}
+
+{{id name="prerequisites"}}Prerequisites{{/id}}
+* Four machines (g111, g112, g113, g114) running Linux/Unix
+* Sudo or root access on all machines
+* Basic knowledge of Linux/Unix commands
+
+{{id name="installing-dsh"}}Installing DSH{{/id}}
+Execute the following commands on each machine:
+{{code language="bash"}}
+sudo apt-get update
+sudo apt-get install dsh
+{{/code}}
+
+{{id name="generating-ssh-keys"}}Generating SSH Keys{{/id}}
+#### {{id name="generate-ssh-key"}}4.1. Generate SSH Key{{/id}}
+On your primary machine (e.g., g111):
+{{code language="bash"}}
+ssh-keygen -t rsa
+{{/code}}
+Follow the prompts to complete the key generation.
+
+#### {{id name="copy-public-key"}}4.2. Copy Public Key to Other Machines{{/id}}
+Copy the public key to the other machines in the network:
+{{code language="bash"}}
+ssh-copy-id username@g112
+ssh-copy-id username@g113
+ssh-copy-id username@g114
+{{/code}}
+Replace `username` with the actual user name on each machine.
+
+{{id name="configuring-dsh"}}Configuring DSH{{/id}}
+#### {{id name="create-machine-list"}}5.1. Create a Machine List File{{/id}}
+Create a file listing all the machines:
+{{code language="bash"}}
+nano ~/machines.list
+{{/code}}
+Add the following machine names:
+{{code}}
+g111
+g112
+g113
+g114
+{{/code}}
+
+#### {{id name="configure-dsh"}}5.2. Configure DSH{{/id}}
+Edit DSH configuration:
+{{code language="bash"}}
+nano ~/.dsh/machines.list
+{{/code}}
+Add the following line:
+{{code}}
+include ~/machines.list
+{{/code}}
+
+{{id name="testing-dsh"}}Testing DSH{{/id}}
+Test your DSH setup:
+{{code language="bash"}}
+dsh -a date
+{{/code}}
+You should see the current date and time from each machine if the setup is correct.
+
+{{id name="troubleshooting"}}Troubleshooting{{/id}}
+* Check SSH key permissions (600 for private keys)
+* Ensure SSH service is running on all machines
+* Verify firewall settings to allow SSH traffic
+
+{{id name="conclusion"}}Conclusion{{/id}}
+{{info}}
+With this setup, you can now execute commands across your network of machines using DSH, simplifying the management of multiple systems.
+{{/info}}
