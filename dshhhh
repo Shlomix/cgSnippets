@@ -1,0 +1,84 @@
+= Distributed Shell (DSH) Setup and Usage Guide =
+
+This page provides detailed instructions on setting up and using Distributed Shell (DSH) to execute commands across multiple Linux machines. It covers the creation of machine groups in DSH and setting up SSH keys for password-less access.
+
+== Introduction to DSH ==
+
+DSH is a tool that allows the execution of the same command on many machines simultaneously. It's especially useful in environments where tasks need to be automated across a cluster of machines.
+
+== Prerequisites ==
+* SSH access to all target machines.
+* DSH installed on the control machine.
+
+== Part 1: SSH Key Setup ==
+
+Before setting up DSH, ensure that you can access all target machines via SSH without entering a password. This is achieved through SSH key-based authentication.
+
+1. **Generate an SSH Key** (if not already existing):
+   On the control machine, generate a new SSH key:
+   (((
+   {{{
+   ssh-keygen -t rsa
+   }}}
+   )))
+   Press Enter to accept the default file location and passphrase.
+
+2. **Copy the SSH Key to Each Machine**:
+   Use `ssh-copy-id` for each target machine. Replace `user@hostname` with your actual username and hostname or IP address.
+   (((
+   {{{
+   ssh-copy-id user@hostname
+   }}}
+   )))
+   Repeat this for each machine (e.g., `ssh-copy-id user@g111`).
+
+== Part 2: Creating DSH Groups ==
+
+DSH uses groups to manage sets of machines for command execution.
+
+1. **Group File Location**:
+   Group files are located at `/etc/dsh/group/` (system-wide) or `~/.dsh/group/` (user-specific).
+
+2. **Adding Hostnames to a Group**:
+   Example group: `mygroup` with machines "g111", "g112", "g113", "g114".
+
+   Create or edit the group file:
+   (((
+   {{{
+   nano ~/.dsh/group/mygroup
+   }}}
+   )))
+   
+   Add each machine in the group:
+   (((
+   {{{
+   g111
+   g112
+   g113
+   g114
+   }}}
+   )))
+
+== Part 3: Running Commands with DSH ==
+
+With SSH keys and groups set up, you can now run commands on all machines in a group.
+
+1. **Simple Command Execution**:
+   Run `hostname` on all machines in `mygroup`:
+   (((
+   {{{
+   dsh -M -g mygroup -c 'hostname'
+   }}}
+   )))
+
+2. **Running Scripts**:
+   Run a script located at `/path/to/script.sh` on all machines:
+   (((
+   {{{
+   dsh -M -g mygroup -c '/path/to/script.sh'
+   }}}
+   )))
+
+== Conclusion ==
+
+DSH is a powerful tool for managing and automating tasks across multiple Linux machines. With SSH key-based authentication and group configuration, it simplifies executing the same task on numerous machines simultaneously.
