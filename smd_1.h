@@ -19,7 +19,7 @@
 #define SIMD_MUL_FLOAT(x, y) vmulq_f32(x, y)
 #define SIMD_FMA_FLOAT(x, y, c) vmlaq_f32(c, x, y)
 #define SIMD_SQRT_FLOAT(x) vsqrtq_f32(x)
-#define SIMD_DIV_FLOAT(x, y) vdivq_f32(x, y) // Note: NEON does not have a direct divide intrinsic, consider a reciprocal approach
+#define SIMD_DIV_FLOAT(x, y) vmulq_f32(x, vrecpeq_f32(y)) // Using reciprocal for division
 
 // Logical operations
 #define SIMD_AND(x, y) vreinterpretq_f32_u32(vandq_u32(vreinterpretq_u32_f32(x), vreinterpretq_u32_f32(y)))
@@ -135,7 +135,10 @@ inline void simd_div(NEON_Data* dst, NEON_Data* src_a_l, NEON_Data* src_a_r)
 {
 #pragma unroll
     for (size_t i = 0; i < span; ++i) {
-        dst[i].data = SIMD_DIV(src_a_l[i].data, src_a_r[i].data);
+        float32x4_t reciprocal = vrecpeq_f32(src_a_r[i].data);
+        reciprocal = vmulq_f32(vrecpsq_f32(src_a_r[i].data, reciprocal), reciprocal);
+        reciprocal = vmulq_f32(vrecpsq_f32(src_a_r[i].data, reciprocal), reciprocal);
+        dst[i].data = vmulq_f32(src_a_l[i].data, reciprocal);
     }
 }
 
