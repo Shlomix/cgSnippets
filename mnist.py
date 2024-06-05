@@ -1,4 +1,5 @@
 import os
+import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -47,7 +48,27 @@ def custom_gradient_operation(gradients):
         modified_gradients.append(avg_grad)
     return modified_gradients
 
-def train(rank, world_size, gpu_count):
+def evaluate(model, device, test_loader):
+    model.eval()
+    test_loss = 0
+    correct = 0
+    criterion = nn.CrossEntropyLoss().to(device)
+    
+    with torch.no_grad():
+        for data, target in test_loader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            test_loss += criterion(output, target).item()  # Sum up batch loss
+            pred = output.argmax(dim=1, keepdim=True)  # Get the index of the max log-probability
+            correct += pred.eq(target.view_as(pred)).sum().item()
+
+    test_loss /= len(test_loader.dataset)
+    accuracy = 100. * correct / len(test_loader.dataset)
+    
+    print(f'\nTest set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{len(test_loader.dataset)} ({accuracy:.2f}%)\n')
+    return test_loss, accuracy
+
+def train(rank, world_size, gpu_count, batch_size):
     setup(rank, world_size)
 
     # Assign GPU device based on rank
@@ -56,15 +77,22 @@ def train(rank, world_size, gpu_count):
 
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
     train_dataset = datasets.MNIST('.', train=True, download=True, transform=transform)
+    test_dataset = datasets.MNIST('.', train=False, download=True, transform=transform)
+    
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
-    train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=64, sampler=train_sampler)
+    train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=batch_size, sampler=train_sampler)
+    test_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=1000, shuffle=False)
 
     model = Net().to(device)
     ddp_model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device])
     criterion = nn.CrossEntropyLoss().to(device)
     optimizer = optim.SGD(ddp_model.parameters(), lr=0.01)
 
+    # Synchronize to ensure all processes start at the same point
+    dist.barrier()
+
     for epoch in range(10):
+        ddp_model.train()
         train_sampler.set_epoch(epoch)
         for batch_idx, (data, target) in enumerate(train_loader):
             data, target = data.to(device), target.to(device)
@@ -85,16 +113,28 @@ def train(rank, world_size, gpu_count):
 
             optimizer.step()
 
+            # Synchronize to ensure all processes have the same state
+            dist.barrier()
+
         print(f"Rank {rank}, Epoch {epoch}, Loss: {loss.item()}")
+        
+        # Evaluate the model
+        if rank == 0:  # Only the master process should print
+            evaluate(ddp_model.module, device, test_loader)
 
     cleanup()
 
 def main():
+    parser = argparse.ArgumentParser(description='PyTorch MNIST DDP Example')
+    parser.add_argument('--batch-size', type=int, default=64, help='input batch size for training (default: 64)')
+    parser.add_argument('--workers', type=int, default=1, help='number of data loading workers (default: 1)')
+    args = parser.parse_args()
+
     world_size = int(os.getenv('WORLD_SIZE'))
     rank = int(os.getenv('RANK'))
     gpu_count = torch.cuda.device_count()
 
-    train(rank, world_size, gpu_count)
+    train(rank, world_size, gpu_count, args.batch_size)
 
 if __name__ == "__main__":
     main()
