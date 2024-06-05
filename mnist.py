@@ -3,7 +3,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from torchvision import datasets, transforms
 
 class Net(nn.Module):
@@ -21,13 +20,12 @@ class Net(nn.Module):
         return x
 
 def setup(rank, world_size):
-    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+    dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
 
 def cleanup():
     dist.destroy_process_group()
 
 def gather_gradients(model):
-    # Gather gradients from all workers
     gradients = []
     for param in model.parameters():
         if param.grad is not None:
@@ -36,26 +34,23 @@ def gather_gradients(model):
             gradients.append(grad_list)
     return gradients
 
-def distribute_gradients(model, gradients):
-    # Distribute modified gradients back to all workers
-    for param, grad_list in zip(model.parameters(), gradients):
+def distribute_gradients(model, modified_gradients):
+    for param, new_grad in zip(model.parameters(), modified_gradients):
         if param.grad is not None:
-            avg_grad = sum(grad_list) / dist.get_world_size()
-            param.grad.data.copy_(avg_grad)
+            param.grad.data.copy_(new_grad)
 
 def custom_gradient_operation(gradients):
-    # Example custom operation: element-wise average of gradients
     modified_gradients = []
     for grad_list in gradients:
         avg_grad = sum(grad_list) / len(grad_list)
         modified_gradients.append(avg_grad)
     return modified_gradients
 
-def train(rank, world_size, gpu_count, processes_per_gpu):
+def train(rank, world_size, gpu_count):
     setup(rank, world_size)
 
-    # Assign GPU device based on rank and processes_per_gpu
-    device = (rank // processes_per_gpu) % gpu_count
+    # Assign GPU device based on rank
+    device = rank % gpu_count
     torch.cuda.set_device(device)
 
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
@@ -64,8 +59,9 @@ def train(rank, world_size, gpu_count, processes_per_gpu):
     train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=64, sampler=train_sampler)
 
     model = Net().to(device)
+    ddp_model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device])
     criterion = nn.CrossEntropyLoss().to(device)
-    optimizer = optim.SGD(model.parameters(), lr=0.01)
+    optimizer = optim.SGD(ddp_model.parameters(), lr=0.01)
 
     for epoch in range(10):
         train_sampler.set_epoch(epoch)
@@ -73,18 +69,18 @@ def train(rank, world_size, gpu_count, processes_per_gpu):
             data, target = data.to(device), target.to(device)
 
             optimizer.zero_grad()
-            output = model(data)
+            output = ddp_model(data)
             loss = criterion(output, target)
             loss.backward()
 
             # Gather gradients from all workers
-            gradients = gather_gradients(model)
+            gradients = gather_gradients(ddp_model)
 
             # Perform custom gradient operation
             modified_gradients = custom_gradient_operation(gradients)
 
             # Distribute modified gradients back to all workers
-            distribute_gradients(model, modified_gradients)
+            distribute_gradients(ddp_model, modified_gradients)
 
             optimizer.step()
 
@@ -93,11 +89,11 @@ def train(rank, world_size, gpu_count, processes_per_gpu):
     cleanup()
 
 def main():
-    world_size = int(os.environ['WORLD_SIZE'])  # Set this environment variable to total number of processes across all nodes
+    world_size = int(os.getenv('WORLD_SIZE'))
+    rank = int(os.getenv('RANK'))
     gpu_count = torch.cuda.device_count()
-    processes_per_gpu = int(os.environ.get('PROCESSES_PER_GPU', 1))  # Set this to the number of processes per GPU
-    rank = int(os.environ['RANK'])  # Set this environment variable to the rank of the current process
-    train(rank, world_size, gpu_count, processes_per_gpu)
+
+    train(rank, world_size, gpu_count)
 
 if __name__ == "__main__":
     main()
