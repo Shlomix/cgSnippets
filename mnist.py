@@ -21,6 +21,7 @@ class Net(nn.Module):
 
 def setup(rank, world_size):
     dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+    torch.manual_seed(42)  # Ensure consistent initialization
 
 def cleanup():
     dist.destroy_process_group()
