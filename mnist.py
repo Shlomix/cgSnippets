@@ -68,8 +68,14 @@ def evaluate(model, device, test_loader):
     print(f'\nTest set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{len(test_loader.dataset)} ({accuracy:.2f}%)\n')
     return test_loss, accuracy
 
-def train(rank, world_size, gpu_count, batch_size):
+def train(rank, world_size, gpu_count, global_batch_size):
     setup(rank, world_size)
+
+    # Ensure global_batch_size is divisible by world_size and greater than world_size
+    assert global_batch_size % world_size == 0, "Global batch size must be divisible by the number of workers"
+    assert global_batch_size >= world_size, "Global batch size must be greater than or equal to the number of workers"
+    
+    local_batch_size = global_batch_size // world_size
 
     # Assign GPU device based on rank
     device = rank % gpu_count
@@ -80,7 +86,7 @@ def train(rank, world_size, gpu_count, batch_size):
     test_dataset = datasets.MNIST('.', train=False, download=True, transform=transform)
     
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
-    train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=batch_size, sampler=train_sampler)
+    train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=local_batch_size, sampler=train_sampler)
     test_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=1000, shuffle=False)
 
     model = Net().to(device)
@@ -126,7 +132,7 @@ def train(rank, world_size, gpu_count, batch_size):
 
 def main():
     parser = argparse.ArgumentParser(description='PyTorch MNIST DDP Example')
-    parser.add_argument('--batch-size', type=int, default=64, help='input batch size for training (default: 64)')
+    parser.add_argument('--batch-size', type=int, required=True, help='global batch size for training')
     parser.add_argument('--workers', type=int, default=1, help='number of data loading workers (default: 1)')
     args = parser.parse_args()
 
