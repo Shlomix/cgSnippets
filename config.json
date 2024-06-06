@@ -1,0 +1,19 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run torchrun",
+      "type": "shell",
+      "command": "torchrun",
+      "args": [
+        "--nproc_per_node=2",
+        "--master_port=12345",
+        "--node_rank=0",
+        "${workspaceFolder}/path/to/your_script.py",
+        "your_script_argument1",
+        "your_script_argument2"
+      ],
+      "problemMatcher": []
+    }
+  ]
+}
