@@ -15,14 +15,22 @@ def setup(rank, world_size):
 def cleanup():
     dist.destroy_process_group()
 
-# Define a simple linear model
-class LinearModel(nn.Module):
+# Define a deeper feedforward neural network
+class DeepModel(nn.Module):
     def __init__(self):
-        super(LinearModel, self).__init__()
-        self.linear = nn.Linear(10, 1)
+        super(DeepModel, self).__init__()
+        self.model = nn.Sequential(
+            nn.Linear(10, 64),
+            nn.ReLU(),
+            nn.Linear(64, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
 
     def forward(self, x):
-        return self.linear(x)
+        return self.model(x)
 
 # Custom communication hook
 def allreduce_hook(state, bucket):
@@ -35,7 +43,7 @@ def train(rank, world_size):
     setup(rank, world_size)
 
     # Create model and move it to the correct device
-    model = LinearModel().to(rank)
+    model = DeepModel().to(rank)
     ddp_model = DDP(model, device_ids=[rank])
 
     # Register the custom communication hook
