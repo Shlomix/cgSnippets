@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 
 # ==============================================
-# Distributed Training Script with Dry-Run Option
+# Distributed Training Script with Dry-Run and Help Options
 # ==============================================
 
 # Default values for DL params
 BATCHSIZE=32
 NUMEPOCHS=8
 DATASET_DIR="/datasets/open-images-v6-mlperf"
-EXTRA_PARAMS="--lr 0.0001 --output-dir=/results"
+LR=0.0001
+OUTPUT_DIR="/results"
 LOG_INTERVAL=20
 TORCH_HOME="$(pwd)/torch-model-cache"
 
@@ -19,8 +20,28 @@ DRY_RUN=false    # By default, we execute the command
 
 # Function to print usage
 usage() {
-  echo "Usage: $0 --hosts 'host1 host2' [--batch-size BATCHSIZE] [--epochs NUMEPOCHS] [--data-dir DATASET_DIR] [--extra-params EXTRA_PARAMS] [--dry-run]"
-  exit 1
+    cat << USAGE
+Usage: $0 --hosts 'host1 host2' [OPTIONS]
+
+Distributed training script using torchrun for multi-node and multi-GPU setups.
+
+Arguments:
+  --hosts 'HOSTS'            A space-separated list of hostnames. The first host is the master.
+
+Optional parameters:
+  --batch-size BATCHSIZE     The batch size for training (default: 32).
+  --epochs NUMEPOCHS         The number of epochs to run (default: 8).
+  --data-dir DATASET_DIR     The path to the dataset (default: /datasets/open-images-v6-mlperf).
+  --lr LR                    Learning rate for training (default: 0.0001).
+  --output-dir OUTPUT_DIR    The directory where output will be saved (default: /results).
+  --log-interval INTERVAL    Frequency (in iterations) to log training info (default: 20).
+  --nproc_per_node N         Number of workers (GPUs) per node (default: 4).
+  --dry-run                  Show the command that would be executed without running it.
+
+Help:
+  --help                     Show this help message and exit.
+USAGE
+    exit 0
 }
 
 # Parse command-line arguments
@@ -44,8 +65,12 @@ case $key in
     DATASET_DIR="$2"
     shift 2
     ;;
-    --extra-params)
-    EXTRA_PARAMS="$2"
+    --lr)
+    LR="$2"
+    shift 2
+    ;;
+    --output-dir)
+    OUTPUT_DIR="$2"
     shift 2
     ;;
     --log-interval)
@@ -60,7 +85,11 @@ case $key in
     DRY_RUN=true
     shift
     ;;
+    --help)
+    usage
+    ;;
     *)
+    echo "Invalid argument: $key"
     usage
     ;;
 esac
@@ -123,12 +152,14 @@ PARAMS=(
     --epochs                  "${NUMEPOCHS}"
     --print-freq              "${LOG_INTERVAL}"
     --data-path               "${DATASET_DIR}"
+    --lr                      "${LR}"
+    --output-dir              "${OUTPUT_DIR}"
 )
 
 # If dry-run is set, print the command that would be run and exit
 if [ "$DRY_RUN" == "true" ]; then
   echo "Dry run mode: The following command would be executed:"
-  echo "${CMD[@]} train.py ${PARAMS[@]} ${EXTRA_PARAMS}"
+  echo "${CMD[@]} train.py ${PARAMS[@]}"
   exit 0
 fi
 
@@ -144,7 +175,7 @@ start_fmt=$(date +%Y-%m-%d\ %r)
 echo "STARTING TIMING RUN AT $start_fmt on $CURRENT_HOST (Rank: $RANK)"
 
 # Run the training script
-"${CMD[@]}" train.py "${PARAMS[@]}" ${EXTRA_PARAMS} ; ret_code=$?
+"${CMD[@]}" train.py "${PARAMS[@]}" ; ret_code=$?
 
 # End timing
 end=$(date +%s)
