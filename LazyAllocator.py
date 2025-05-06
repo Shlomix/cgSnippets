@@ -1,195 +1,164 @@
 # ---------------------------------------------------------------------------
-#  Dummy stand‑in for fem_boost_model
+#  Minimal stub for fem_boost_model
 # ---------------------------------------------------------------------------
 class DummyBoostModel:
-    """Allocates monotonically increasing table IDs."""
+    """Returns monotonically increasing table IDs on demand."""
     def __init__(self, start: int = 0):
         self._next = start
 
-    def alloc_table(self) -> int:
+    def alloc_table(self) -> int:              # called lazily
         tid, self._next = self._next, self._next + 1
         return tid
 
 
 # ---------------------------------------------------------------------------
-#  LazyPagedAllocator  –  tables created on demand, no infinite loop
+#  L a z y   P a g e d   A l l o c a t o r
 # ---------------------------------------------------------------------------
-from collections import defaultdict
 from typing import Dict, List
+from collections import defaultdict
 
 
 class LazyPagedAllocator:
     """
-    Single‑batch, on‑demand KV‑page allocator.
+    On‑demand, worker‑ordered KV‑page allocator for **one batch**.
 
-    • Tables are instantiated (model.alloc_table) only when a page is first
-      placed on them.
-    • Current worker’s tables are filled before moving to the next worker.
-    • If every possible table in every worker is full, a RuntimeError is
-      raised instead of looping indefinitely.
+    *   No tables are created in __init__; each appears only when its
+        first page is placed.
+    *   Current worker’s tables are filled to `table_capacity` before the
+        pointer advances to the next worker.
+    *   If every possible table is full, a RuntimeError is raised cleanly.
+
+    Parameters
+    ----------
+    batch_size : int
+        Number of sequences (seq_id is their index 0…batch_size‑1).
+    worker_table_counts : Dict[int, int]
+        {worker_id: max_tables_owned}.  Zero is allowed → worker skipped.
+    fem_boost_model : object exposing .alloc_table() → int
+    page_size : int
+        Tokens per page.
+    table_capacity : int
+        Pages a table can hold.
     """
 
+    # -------- construction -------------------------------------------------
     def __init__(self,
                  batch_size: int,
                  worker_table_counts: Dict[int, int],
                  fem_boost_model,
                  page_size: int,
                  table_capacity: int):
-        """
-        Parameters
-        ----------
-        batch_size : int
-            Number of sequences in the batch (seq_id is 0 … batch_size‑1)
-        worker_table_counts : {worker_id: max_tables_owned}
-            Workers may own 0 tables; workers appear in numerical order.
-        fem_boost_model : object with .alloc_table() → int
-        page_size : int
-            Tokens per page
-        table_capacity : int
-            Pages a table can hold
-        """
-        if batch_size <= 0:
+
+        if batch_size < 1:
             raise ValueError("batch_size must be positive")
 
         self.B                = batch_size
+        self.workers          = [w for w in sorted(worker_table_counts)
+                                 if worker_table_counts[w] > 0]
+        if not self.workers:
+            raise ValueError("No worker owns any tables")
+
+        self.max_tables       = worker_table_counts
+        self.model            = fem_boost_model
         self.page_size        = page_size
         self.table_capacity   = table_capacity
-        self.model            = fem_boost_model
 
-        # workers sorted numerically; each has a max‑table quota
-        self.workers          = sorted(worker_table_counts)
-        self.max_tables       = worker_table_counts
+        # dynamic per‑worker structures (all start empty)
+        self.tables_per_worker: Dict[int, List[int]] = defaultdict(list)
+        self.used_pages:        Dict[int, List[int]] = defaultdict(list)
+        self.next_page_id:      Dict[int, List[int]] = defaultdict(list)
+        self.current_table_idx: Dict[int, int]       = defaultdict(int)  # per‑worker ptr
 
-        # dynamic per‑worker data
-        self.tables_per_worker: Dict[int, List[int]] = {w: [] for w in self.workers}
-        self.used_pages:        Dict[int, List[int]] = {w: [] for w in self.workers}
-        self.next_page_id:      Dict[int, List[int]] = {w: [] for w in self.workers}
-
-        # pointers
-        self._worker_idx     = 0      # index in self.workers
-        self._table_idx_in_w = 0      # table offset inside current worker
+        # pointer to current worker (index in self.workers)
+        self.worker_ptr = 0
 
         # per‑sequence state
-        self.tokens_seen     = [0] * self.B
-        self.page_mappings   = [[] for _ in range(self.B)]
+        self.tokens_seen   = [0] * self.B
+        self.page_mappings = [[] for _ in range(self.B)]
 
-    # ------------------------------------------------------------------ #
-    # public: advance decoding by +1 token for EVERY sequence            #
-    # ------------------------------------------------------------------ #
+    # -------- public: advance decoding by ONE token ------------------------
     def step(self):
         """
-        Give every sequence one more token.  Allocate a new page only when
-        the added token is the first token of that page (0‑based counts:
-        0, page_size, 2*page_size …).  Returns the full page_mappings.
+        Give every sequence one more token.  A new page is allocated only
+        when the fresh token is the first token of a page (i.e. when the
+        previous total was 0, page_size, 2*page_size, …).
+
+        Returns
+        -------
+        List[List[dict]]
+            `page_mappings` – list[seq_id] → list of
+            {"worker_id", "table_id", "page_id"}.
         """
         for seq in range(self.B):
             prev = self.tokens_seen[seq]
             self.tokens_seen[seq] = prev + 1
-            if prev % self.page_size == 0:
+            if prev % self.page_size == 0:       # entering a new page
                 self._allocate_one_page(seq)
         return self.page_mappings
 
-    # ------------------------------------------------------------------ #
-    # internal helpers                                                   #
-    # ------------------------------------------------------------------ #
+    # -------- internals ----------------------------------------------------
     def _allocate_one_page(self, seq_id: int):
-        tried_all = False
+        """Find a free slot anywhere; allocate exactly ONE page there."""
+        start_worker_idx = self.worker_ptr
+
         while True:
-            wid = self.workers[self._worker_idx]
+            wid = self.workers[self.worker_ptr]
 
-            # Ensure the current worker has at least one table slot
+            # ensure there's a current table for this worker
             if not self.tables_per_worker[wid]:
-                if not self._maybe_make_table(wid):
-                    tried_all = self._advance_worker(tried_all)
-                    continue
+                self._make_new_table(wid)
 
-            # current table indices valid?
-            if self._table_idx_in_w >= len(self.tables_per_worker[wid]):
-                tried_all = self._advance_worker(tried_all)
-                continue
+            tidx = self.current_table_idx[wid]      # table index inside worker
+            # if current table is full, move to next table (or next worker)
+            if self.used_pages[wid][tidx] >= self.table_capacity:
+                # try to create a new table if quota allows
+                if len(self.tables_per_worker[wid]) < self.max_tables[wid]:
+                    self._make_new_table(wid)
+                    tidx = self.current_table_idx[wid]  # new table is last one
+                else:
+                    self._advance_worker()
+                    if self.worker_ptr == start_worker_idx:
+                        raise RuntimeError("All workers out of capacity")
+                    continue  # loop again with new worker
 
-            slot = self._table_idx_in_w
-            if self.used_pages[wid][slot] >= self.table_capacity:
-                # table full → try next table (or worker)
-                tried_all = self._advance_table_or_worker(wid, tried_all)
-                continue
-
-            # --- place the page -----------------------------------------
-            tid     = self.tables_per_worker[wid][slot]
-            page_id = self.next_page_id[wid][slot]
+            # we now have a table with free space
+            tid   = self.tables_per_worker[wid][tidx]
+            pid   = self.next_page_id[wid][tidx]
 
             self.page_mappings[seq_id].append(
                 {"worker_id": wid,
                  "table_id":  tid,
-                 "page_id":   page_id}
+                 "page_id":   pid}
             )
 
             # book‑keeping
-            self.next_page_id[wid][slot] += 1
-            self.used_pages[wid][slot]   += 1
+            self.next_page_id[wid][tidx] += 1
+            self.used_pages[wid][tidx]   += 1
 
-            # if table became full, move pointer so next allocation looks elsewhere
-            if self.used_pages[wid][slot] >= self.table_capacity:
-                self._advance_table_or_worker(wid)
+            # if table just became full, update pointer for next time
+            if self.used_pages[wid][tidx] >= self.table_capacity:
+                self.current_table_idx[wid] += 1
+                if self.current_table_idx[wid] >= len(self.tables_per_worker[wid]):
+                    # will allocate or move worker on next call
+                    self.current_table_idx[wid] = len(self.tables_per_worker[wid]) - 1
 
             return  # success
 
-    # ------------ pointer / table management --------------------------- #
-    def _maybe_make_table(self, wid: int) -> bool:
-        """Create a new table for worker wid if quota allows."""
-        if len(self.tables_per_worker[wid]) >= self.max_tables[wid]:
-            return False
+    def _make_new_table(self, wid: int):
+        """Instantiate a fresh table for worker `wid`."""
         tid = self.model.alloc_table()
         self.tables_per_worker[wid].append(tid)
         self.used_pages[wid].append(0)
         self.next_page_id[wid].append(0)
-        return True
+        self.current_table_idx[wid] = len(self.tables_per_worker[wid]) - 1
 
-    def _advance_table_or_worker(self, wid: int, tried_all=False) -> bool:
-        """Move to next table in same worker; if none, advance worker."""
-        self._table_idx_in_w += 1
-        if self._table_idx_in_w < len(self.tables_per_worker[wid]):
-            return False  # stayed in same worker
-        # need a new table or move worker
-        if self._maybe_make_table(wid):
-            return False
-        return self._advance_worker(tried_all)
+    def _advance_worker(self):
+        """Move the worker pointer to the next worker in round‑robin order."""
+        self.worker_ptr = (self.worker_ptr + 1) % len(self.workers)
 
-    def _advance_worker(self, tried_all=False) -> bool:
-        """
-        Move to next worker.  If we've already looped all workers and found
-        no space, raise RuntimeError (only once).
-        """
-        start = self._worker_idx
-        while True:
-            self._worker_idx = (self._worker_idx + 1) % len(self.workers)
-            self._table_idx_in_w = 0
-            wid = self.workers[self._worker_idx]
-
-            # skip workers with 0‑table quota
-            if self.max_tables[wid] == 0:
-                if self._worker_idx == start:
-                    break        # full loop, no space
-                continue
-
-            # ensure at least one table exists or can be created
-            if self.tables_per_worker[wid] or self._maybe_make_table(wid):
-                return False     # moved to a worker with space
-
-            if self._worker_idx == start:
-                break            # checked everyone
-
-        if tried_all:
-            raise RuntimeError("All workers are out of table capacity")
-        return self._advance_worker(True)  # one recursive retry
-
-
-# ---------------------------------------------------------------------------
-#  Tiny demo (will throw RuntimeError when fully exhausted)                  #
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     SEQS    = 4
-    WORKERS = {0: 2, 1: 0, 2: 1}   # worker‑1 owns 0 tables
+    WORKERS = {0: 2, 1: 0, 2: 1}   # worker‑1 owns zero tables
     PAGE_SZ = 4
     CAP     = 3
 
@@ -198,12 +167,12 @@ if __name__ == "__main__":
                                page_size=PAGE_SZ,
                                table_capacity=CAP)
 
-    for step in range(12):
+    for step in range(12):         # stop when RuntimeError occurs
         try:
             mapping = alloc.step()
             print(f"\nstep {step+1}")
             for s, m in enumerate(mapping):
                 print(f"  seq{s}: {m}")
         except RuntimeError as e:
-            print(f"\nStopped at step {step+1}: {e}")
+            print(f"\nAllocator halted at step {step+1}: {e}")
             break
