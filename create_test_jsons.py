@@ -1,49 +1,73 @@
-#!/usr/bin/env python3
-"""
-generate_specs.py
-=================
-Create 12 JSON spec files—one for every combination:
+import os
+import json
+import math
 
-    tp ∈ {1, 2}
-    pp ∈ {1, 2}
-    remotes ∈ {0, 1, 2}
+def suggest_table_allocation_order(num_tables, remote_worker_ids, last_remote_grows=True):
+    if not remote_worker_ids:
+        return [(-1, num_tables)]
 
-Each spec encodes:
-  • page_size      = 16
-  • pages_per_table= 2
-  • warmed-up flag (handled explicitly in tests now)
-  • remote_max_tables:  None | 2 | 1   (per earlier capacity rules)
-  • sequences: shorthand  "auto:4x16"  (expanded by your runner)
-  • decode_steps: 4
-Files are written to ./allocator_specs/<name>.json
-"""
+    order = [(-1, 1)]
+    rem_tables = max(0, num_tables - 1)
 
-import json, itertools, pathlib, shutil
+    if last_remote_grows:
+        base = rem_tables // len(remote_worker_ids)
+        remainder = rem_tables % len(remote_worker_ids)
+        for i, wid in enumerate(remote_worker_ids):
+            extra = remainder if i == len(remote_worker_ids) - 1 else 0
+            order.append((wid, base + extra))
+    else:
+        per = math.ceil(rem_tables / len(remote_worker_ids))
+        for wid in remote_worker_ids:
+            order.append((wid, per))
 
-# --------------------------------------------------------------------- #
-spec_dir = pathlib.Path("allocator_specs")
-if spec_dir.exists():
-    shutil.rmtree(spec_dir)
-spec_dir.mkdir()
+    return order
 
-def remote_cap(rem: int) -> int | None:
-    """Rule: 0 → None, 1 → 2 tables, 2 → 1 table."""
-    return None if rem == 0 else (2 if rem == 1 else 1)
-
-count = 0
-for tp, pp, rem in itertools.product((1, 2), (1, 2), (0, 1, 2)):
-    spec = {
-        "name": f"tp{tp}_pp{pp}_rem{rem}",
-        "tp": tp,
-        "pp": pp,
-        "remotes": rem,
-        "remote_max_tables": remote_cap(rem),
+test_cases = {
+    "local_only": {
+        "input_ids": [list(range(16))] * 4,
+        "decode_tokens": 4,
         "page_size": 16,
         "pages_per_table": 2,
-        "sequences": "auto:4x16",   # your runner expands this
-        "decode_steps": 4
+        "remote_worker_ids": []
+    },
+    "local_and_1_remote": {
+        "input_ids": [list(range(16))] * 4,
+        "decode_tokens": 4,
+        "page_size": 16,
+        "pages_per_table": 2,
+        "remote_worker_ids": [0]
+    },
+    "local_and_2_remotes": {
+        "input_ids": [list(range(16))] * 4,
+        "decode_tokens": 4,
+        "page_size": 16,
+        "pages_per_table": 2,
+        "remote_worker_ids": [0, 1]
+    },
+    "remotes_only_2": {
+        "input_ids": [list(range(16))] * 4,
+        "decode_tokens": 4,
+        "page_size": 16,
+        "pages_per_table": 2,
+        "remote_worker_ids": [0, 1]
+    },
+    "sanity_local_bigtable": {
+        "input_ids": [list(range(16))] * 64,
+        "decode_tokens": 8,
+        "page_size": 16,
+        "pages_per_table": 1536,
+        "remote_worker_ids": []
     }
-    (spec_dir / f"{spec['name']}.json").write_text(json.dumps(spec, indent=2))
-    count += 1
+}
 
-print(f"✅  Generated {count} spec files in {spec_dir}/")
+os.makedirs("test_jsons", exist_ok=True)
+
+for name, cfg in test_cases.items():
+    total_tokens = sum(len(x) for x in cfg["input_ids"]) + cfg["decode_tokens"] * len(cfg["input_ids"])
+    total_pages = math.ceil(total_tokens / cfg["page_size"])
+    total_tables = math.ceil(total_pages / cfg["pages_per_table"])
+    table_order = suggest_table_allocation_order(total_tables, cfg["remote_worker_ids"])
+    cfg["table_allocation_order"] = table_order
+
+    with open(f"test_jsons/{name}.json", "w") as f:
+        json.dump(cfg, f, indent=2)

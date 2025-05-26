@@ -1,41 +1,39 @@
 import json
-from pathlib import Path
-from page_allocator import PageAllocator
+import math
+import os
+from page_allocator_streamed import PageAllocatorStreamed
 
-json_dir = Path("allocator_json_step_tests")
-json_files = list(json_dir.glob("*.json"))
+def alloc_table_logger(log):
+    def allocator(worker_id):
+        tid = len(log)
+        log.append((worker_id, tid))
+        return tid
+    return allocator
 
-for json_file in json_files:
-    with open(json_file) as f:
+results = []
+
+for filename in os.listdir("test_jsons"):
+    if not filename.endswith(".json"):
+        continue
+    with open(os.path.join("test_jsons", filename)) as f:
         cfg = json.load(f)
 
-    table_log = []
-    def alloc_table(worker_id: int) -> int:
-        table_id = len(table_log)
-        table_log.append((worker_id, table_id))
-        return table_id
-
-    allocator = PageAllocator(
-        page_size=cfg["page_size"],
+    log = []
+    allocator = PageAllocatorStreamed(
         pages_per_table=cfg["pages_per_table"],
-        remote_worker_ids=cfg["remote_worker_ids"],
-        decode_tokens=cfg["decode_tokens"],
-        alloc_table=alloc_table,
-        locals_present=cfg["locals_present"],
-        allow_single_local=cfg["allow_single_local"],
-        expandable_remote=cfg["expandable_remote"],
+        table_allocation_order=cfg["table_allocation_order"],
+        alloc_table=alloc_table_logger(log)
     )
 
-    allocator.warmup()
-    seq_lens = [len(x) for x in cfg["input_ids"]]
-    allocator.prefill(seq_lens)
+    try:
+        allocator.warmup()
+        allocator.prefill(cfg["input_ids"], cfg["page_size"])
+        for _ in range(cfg["decode_tokens"]):
+            allocator.step(len(cfg["input_ids"]), cfg["page_size"])
 
-    for _ in range(cfg["decode_tokens"]):
-        allocator.step(len(cfg["input_ids"]))
+        results.append((filename, "PASS", log))
+    except Exception as e:
+        results.append((filename, "FAIL", str(e)))
 
-    print({
-        "test": json_file.name,
-        "workers_used": allocator.workers_used(),
-        "total_tables": len(allocator.table_summary()),
-        "table_log": table_log
-    })
+for name, status, details in results:
+    print(f"{name:<30} {status} {details if status == 'FAIL' else ''}")
