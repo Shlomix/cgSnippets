@@ -39,3 +39,23 @@ KV = max_m * bs                                              # truncate padded t
 k_full = k_full[:, :KV, :]
 v_full = v_full[:, :KV, :]
 # ---- END SAFE GATHER ----
+
+
+nh = int(self.num_heads_per_partition)
+Hq = int(getattr(query, "shape", (0, 0, 0))[-1] or 0)
+if (nh > 0) and (Hq % nh == 0) and (Hq == Hk):
+    D = Hq // nh
+    # IMPORTANT: compute S_cur robustly (TH/BSH):
+    shp = getattr(query, "shape", ())
+    S_cur = int(shp[0]) if len(shp) == 2 else int(shp[1] or 1)  # TH uses first dim; BSH uses second
+
+    q_bnsd = ops.transpose(ops.reshape(query,  (B, S_cur, nh, D)), (0, 2, 1, 3))
+    k_bnsd = ops.transpose(ops.reshape(k_full, (B, KV,   nh, D)), (0, 2, 1, 3))
+    v_bnsd = ops.transpose(ops.reshape(v_full, (B, KV,   nh, D)), (0, 2, 1, 3))
+
+    context_layer = self.fa_prefill(
+        q_bnsd, k_bnsd, v_bnsd,
+        attn_mask, alibi_mask, None, None,
+        q_seq_lens, batch_valid_length
+    )
+    return context_layer
